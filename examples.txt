@@ -1,0 +1,32 @@
+// FACTION MEMBERS
+
+{
+  "members": [
+    {
+      "id": 1073741824,
+      "name": "string",
+      "position": "string",
+      "level": 1073741824,
+      "days_in_faction": 1073741824,
+      "is_revivable": true,
+      "is_on_wall": true,
+      "is_in_oc": true,
+      "has_early_discharge": true,
+      "last_action": {
+        "status": "string",
+        "timestamp": 1073741824,
+        "relative": "string"
+      },
+      "status": {
+        "description": "string",
+        "details": "string",
+        "state": "string",
+        "until": 1073741824
+      },
+      "revive_setting": "Everyone"
+    }
+  ]
+}
+
+// END FACTION MEMBERS
+

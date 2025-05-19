@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  oc-bot:
+    build: .
+    container_name: oc-bot
+    env_file:
+      - .env
+    volumes:
+      - ./botdata.sqlite:/usr/src/app/botdata.sqlite
+    restart: unless-stopped

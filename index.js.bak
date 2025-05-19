@@ -1,0 +1,52 @@
+// Basic Discord bot with cron and sqlite integration
+const { Client, GatewayIntentBits } = require('discord.js');
+const sqlite3 = require('sqlite3').verbose();
+const cron = require('node-cron');
+
+// --- CONFIGURATION ---
+const DISCORD_TOKEN = 'YOUR_DISCORD_BOT_TOKEN_HERE'; // Replace with your bot token
+const DB_PATH = './botdata.sqlite';
+
+// --- Discord Client Setup ---
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// --- SQLite Setup ---
+const db = new sqlite3.Database(DB_PATH, (err) => {
+    if (err) {
+        console.error('Could not connect to database', err);
+    } else {
+        console.log('Connected to SQLite database');
+    }
+});
+
+// Example table creation (run once on startup)
+db.run(`CREATE TABLE IF NOT EXISTS example_table (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL
+)`);
+
+// --- Scheduled Task (every minute) ---
+cron.schedule('* * * * *', () => {
+    const now = new Date().toISOString();
+    db.run('INSERT INTO example_table (timestamp) VALUES (?)', [now], (err) => {
+        if (err) {
+            console.error('Failed to insert timestamp:', err);
+        } else {
+            console.log('Inserted timestamp:', now);
+        }
+    });
+});
+
+// --- Discord Event Handlers ---
+client.once('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+});
+
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName === 'ping') {
+        await interaction.reply('Pong!');
+    }
+});
+
+client.login(DISCORD_TOKEN);

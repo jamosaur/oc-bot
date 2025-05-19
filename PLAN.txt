@@ -1,0 +1,57 @@
+# PLAN: Discord Bot for OC Tracking
+
+## 1. Project Setup
+- [x] Initialize Node.js project
+- [x] Install dependencies: discord.js, sqlite3, node-cron, typescript, @types/*
+- [x] Configure TypeScript (tsconfig.json)
+
+## 2. Discord Bot Basics
+- [x] Create bot login and basic event handling
+- [x] Implement command: `!setchannel #channel-name` to store channel ID in database for updates
+- [x] Store/retrieve channel ID in SQLite
+
+## 2a. User Import
+- [x] After fetching the first Torn API response, import all users into the SQLite database
+    - [x] Store only: ID, name, last action, and is_in_oc
+
+## 3. Scheduled Tasks
+- [x] Set up cron job to run every minute
+- [x] On each tick, fetch data from Torn API (using API key from config)
+- [x] Parse and type data using structure from examples.txt
+
+## 4. Message Management
+- [x] On first run, send a message to the configured channel and store its message ID
+- [x] On each cron tick, update this message with the latest summary/status
+
+## 5. OC Tracking Logic
+- [x] For each member in the API response:
+    - [x] Track if `is_in_oc` is false
+    - [x] Track duration of `is_in_oc === false` for each user (store timestamp in DB)
+    - [x] Reset timer when `is_in_oc` becomes true
+    - [x] If timer reaches 24 hours, send alert message in channel
+
+## 6. Alert Message Handling
+- [x] When a user hits 24 hours, send a message with their name
+- [x] Add two reactions: check (✅) and cross (❌)
+- [x] Listen for reactions:
+    - [x] If check (✅), increment user's "fuckup" tally in DB
+    - [x] If cross (❌), do nothing
+- [x] After 5 minutes from first reaction, delete the alert message
+
+## 7. Configuration
+- [x] Allow setting and storing Torn API key securely (e.g., via command or config file, not hardcoded)
+
+## 8. Types & Structure
+- [x] Define TypeScript types/interfaces for API response (based on examples.txt)
+- [x] Use types throughout code for safety
+
+## 9. Error Handling & Logging
+- [~] Add robust error handling and logging for API, Discord, and DB actions
+
+## 10. Polish & Testing
+- [~] Test all flows: channel setup, cron, API, DB, alerts, reactions, message deletion
+- [~] Add comments and clean up code
+
+---
+
+This plan covers all steps from bot setup, command handling, API integration, OC tracking, alerting, reaction handling, and database management. Each step can be checked off as you implement it.
