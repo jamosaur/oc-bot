@@ -2,8 +2,8 @@ import { Client, GatewayIntentBits, Interaction, TextChannel, Message } from 'di
 import dotenv from 'dotenv';
 dotenv.config();
 import { TornFactionMembersResponse, TornFactionMember } from './types';
-import sqlite3 from 'sqlite3';
 import cron from 'node-cron';
+import { sequelize, syncDb, Config, User, Alert } from './db';
 
 // --- CONFIGURATION ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN || '';
@@ -12,38 +12,12 @@ if (!DISCORD_TOKEN) {
     process.exit(1);
 }
 const TORN_API_KEY = process.env.TORN_API_KEY || '';
-const DB_PATH = './botdata.sqlite';
+
+// --- DB INIT ---
+syncDb();
 
 // --- Discord Client Setup ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-
-// --- SQLite Setup ---
-const db = new sqlite3.Database(DB_PATH, (err: Error | null) => {
-    if (err) {
-        console.error('Could not connect to database', err);
-    } else {
-        console.log('Connected to SQLite database');
-    }
-});
-
-// Config table for storing channel ID
-const CONFIG_TABLE = `CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-)`;
-db.run(CONFIG_TABLE);
-
-// User table for storing Torn API members
-const USER_TABLE = `CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    last_action_timestamp INTEGER NOT NULL,
-    last_action_status TEXT NOT NULL,
-    is_in_oc INTEGER NOT NULL,
-    not_in_oc_since INTEGER,
-    fuckup_tally INTEGER DEFAULT 0
-)`;
-db.run(USER_TABLE);
 
 
 // --- Torn API Fetch ---
@@ -63,72 +37,77 @@ async function runOcUpdate() {
     let apiKey = TORN_API_KEY;
     if (!apiKey) {
         // Fallback to DB if not set in env
-        const keyRow: { value: string } | undefined = await new Promise(resolve => {
-            db.get('SELECT value FROM config WHERE key = ?', ['torn_api_key'], (err, row) => {
-                if (err || !row) resolve(undefined);
-                else resolve(row as { value: string });
-            });
-        });
+        const keyRow = await Config.findByPk('torn_api_key');
         apiKey = keyRow?.value || '';
     }
     if (!apiKey) {
         console.warn('No Torn API key set. Skipping OC check.');
         return;
     }
-    // Get Torn API key and update channel from config
-    db.get('SELECT value FROM config WHERE key = ?', ['update_channel'], async (err, channelRow) => {
-        if (err || !channelRow) {
-            if (!err) console.log('Update channel not set.');
-            return;
-        }
-        const channelId = (channelRow as { value: string }).value;
-        const data = await fetchTornFactionMembers(apiKey);
-        if (!data) return;
+    // Get update channel from config
+    const channelConfig = await Config.findByPk('update_channel');
+    if (!channelConfig) {
+        console.log('Update channel not set.');
+        return;
+    }
+    const channelId = channelConfig.value;
+    const data = await fetchTornFactionMembers(apiKey);
+    if (!data) return;
 
-        // Import users on first fetch
-        const nowTs = Math.floor(Date.now() / 1000);
-        const usersImported = await new Promise<boolean>(resolve => {
-            db.get('SELECT COUNT(*) as count FROM users', (err, row: { count: number }) => {
-                resolve(row && row.count > 0);
+    // Import users on first fetch
+    const nowTs = Math.floor(Date.now() / 1000);
+    const usersImported = await User.count();
+    if (!usersImported) {
+        for (const member of data.members) {
+            await User.upsert({
+                id: member.id,
+                name: member.name,
+                last_action_timestamp: member.last_action.timestamp,
+                last_action_status: member.last_action.status,
+                is_in_oc: !!member.is_in_oc,
+                not_in_oc_since: !member.is_in_oc ? nowTs : null,
             });
-        });
-        if (!usersImported) {
-            const stmt = db.prepare('INSERT OR REPLACE INTO users (id, name, last_action_timestamp, last_action_status, is_in_oc, not_in_oc_since) VALUES (?, ?, ?, ?, ?, ?)');
-            for (const member of data.members) {
-                stmt.run(
-                    member.id,
-                    member.name,
-                    member.last_action.timestamp,
-                    member.last_action.status,
-                    member.is_in_oc ? 1 : 0,
-                    !member.is_in_oc ? nowTs : null
-                );
-            }
-            stmt.finalize();
-            console.log('Imported users from Torn API.');
-        } else {
-            // Update users and not_in_oc_since logic
-            for (const member of data.members) {
-                db.get('SELECT not_in_oc_since FROM users WHERE id = ?', [member.id], (err, row) => {
-                    const dbRow = row as { not_in_oc_since: number | null };
-                    if (!err && dbRow) {
-                        if (!member.is_in_oc && !dbRow.not_in_oc_since) {
-                            // Set not_in_oc_since
-                            db.run('UPDATE users SET not_in_oc_since = ? WHERE id = ?', [nowTs, member.id]);
-                        } else if (member.is_in_oc && dbRow.not_in_oc_since) {
-                            // Clear not_in_oc_since
-                            db.run('UPDATE users SET not_in_oc_since = NULL WHERE id = ?', [member.id]);
-                        }
-                        db.run('UPDATE users SET last_action_timestamp = ?, last_action_status = ?, is_in_oc = ? WHERE id = ?', [
-                            member.last_action.timestamp,
-                            member.last_action.status,
-                            member.is_in_oc ? 1 : 0,
-                            member.id
-                        ]);
-                    }
-                });
-            }
         }
+        console.log('Imported users from Torn API.');
+    } else {
+        // Update users and not_in_oc_since logic
+            for (const member of data.members) {
+                const dbRow = await User.findByPk(member.id);
+                if (!member.is_in_oc) {
+                    if (!dbRow || !dbRow.not_in_oc_since) {
+                        // Mark the time they went out of OC
+                        await User.upsert({
+                            id: member.id,
+                            name: member.name,
+                            last_action_timestamp: member.last_action.timestamp,
+                            last_action_status: member.last_action.status,
+                            is_in_oc: !!member.is_in_oc,
+                            not_in_oc_since: nowTs,
+                        });
+                    } else {
+                        // Already marked as out of OC, just update other fields
+                        await User.upsert({
+                            id: member.id,
+                            name: member.name,
+                            last_action_timestamp: member.last_action.timestamp,
+                            last_action_status: member.last_action.status,
+                            is_in_oc: !!member.is_in_oc,
+                            not_in_oc_since: dbRow.not_in_oc_since,
+                        });
+                    }
+                } else {
+                    // In OC, reset not_in_oc_since if needed
+                    await User.upsert({
+                        id: member.id,
+                        name: member.name,
+                        last_action_timestamp: member.last_action.timestamp,
+                        last_action_status: member.last_action.status,
+                        is_in_oc: !!member.is_in_oc,
+                        not_in_oc_since: null,
+                    });
+                }
+            }
+        
 
         // Prepare a summary message
         const membersArr = Object.values(data.members);
@@ -138,38 +117,41 @@ async function runOcUpdate() {
         // List members not in OC with duration
         const now = Math.floor(Date.now() / 1000);
         // We'll need to query the DB for not_in_oc_since
-        db.all('SELECT id, name, not_in_oc_since, last_action_timestamp FROM users WHERE is_in_oc = 0', (err, rows) => {
-            const notInOCMembers = (rows as Array<{ id: number, name: string, not_in_oc_since: number, last_action_timestamp: number }>).map(row => {
-                // Time not in OC
-                let durationNotInOC = '';
-                if (row.not_in_oc_since) {
-                    const seconds = now - row.not_in_oc_since;
-                    const hours = Math.floor(seconds / 3600);
-                    const minutes = Math.floor((seconds % 3600) / 60);
-                    if (hours > 0) durationNotInOC += `${hours}h `;
-                    durationNotInOC += `${minutes}m`;
-                } else {
-                    durationNotInOC = '0m';
-                }
-                // Time since last action
-                let durationLastAction = '';
-                if (row.last_action_timestamp) {
-                    const seconds = now - row.last_action_timestamp;
-                    const hours = Math.floor(seconds / 3600);
-                    const minutes = Math.floor((seconds % 3600) / 60);
-                    if (hours > 0) durationLastAction += `${hours}h `;
-                    durationLastAction += `${minutes}m`;
-                } else {
-                    durationLastAction = '0m';
-                }
-                return {
-                    id: row.id,
-                    name: row.name,
-                    notInOcSince: row.not_in_oc_since,
-                    durationNotInOC,
-                    durationLastAction
-                };
-            });
+        const rows = await User.findAll({
+            where: { is_in_oc: false },
+            attributes: ['id', 'name', 'not_in_oc_since', 'last_action_timestamp']
+        });
+        const notInOCMembers = rows.map(row => {
+            // Time not in OC
+            let durationNotInOC = '';
+            if (row.not_in_oc_since) {
+                const seconds = now - row.not_in_oc_since;
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                if (hours > 0) durationNotInOC += `${hours}h `;
+                durationNotInOC += `${minutes}m`;
+            } else {
+                durationNotInOC = '0m';
+            }
+            // Time since last action
+            let durationLastAction = '';
+            if (row.last_action_timestamp) {
+                const seconds = now - row.last_action_timestamp;
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                if (hours > 0) durationLastAction += `${hours}h `;
+                durationLastAction += `${minutes}m`;
+            } else {
+                durationLastAction = '0m';
+            }
+            return {
+                id: row.id,
+                name: row.name,
+                notInOcSince: row.not_in_oc_since,
+                durationNotInOC,
+                durationLastAction
+            };
+        });
             const notInOCList = notInOCMembers.length ? notInOCMembers.map(m => `• ${m.name} (Not in OC: ${m.durationNotInOC}, Last action: ${m.durationLastAction})`).join('\n') : 'None!';
             const lastUpdated = Math.floor(Date.now() / 1000);
             // Next full minute (seconds === 0)
@@ -181,66 +163,60 @@ async function runOcUpdate() {
 
 
             // --- 24h alert logic ---
-            notInOCMembers.forEach(async m => {
+            for (const m of notInOCMembers) {
                 if (m.notInOcSince && (now - m.notInOcSince) >= 86400) {
                     // Only alert if not already alerted in last 24h (use a simple table)
-                    db.get('SELECT last_alert FROM alerts WHERE user_id = ?', [m.id], async (err, row) => {
-                        const alertRow = row as { last_alert?: number };
-                        if (!alertRow || !alertRow.last_alert || (now - alertRow.last_alert) >= 86400) {
-                            // Send alert
-                            const channel = await client.channels.fetch(channelId).catch(() => null);
-                            if (channel && 'send' in channel) {
-                                const alertMsg = await (channel as TextChannel).send(`⚠️ <@&everyone> ${m.name} has not been in an OC for 24h! React ✅ to increment their tally, ❌ to ignore.`);
-                                // Insert/Update alert
-                                db.run('INSERT OR REPLACE INTO alerts (user_id, last_alert) VALUES (?, ?)', [m.id, now]);
-                                // Add reactions
-                                await alertMsg.react('✅');
-                                await alertMsg.react('❌');
-                                // Listen for reactions
-                                const filter = (reaction: any, user: any) => ['✅', '❌'].includes(reaction.emoji.name) && !user.bot;
-                                const collector = alertMsg.createReactionCollector({ filter, time: 5 * 60 * 1000, max: 1 });
-                                collector.on('collect', (reaction, user) => {
-                                    if (reaction.emoji.name === '✅') {
-                                        db.run('UPDATE users SET fuckup_tally = COALESCE(fuckup_tally, 0) + 1 WHERE id = ?', [m.id]);
-                                    }
-                                    // No action for ❌
-                                });
-                                collector.on('end', () => {
-                                    alertMsg.delete().catch(() => {});
-                                });
-                            }
-                        }
-                    });
-                }
-            });
-
-            // Get the channel and send/update the message
-            (async () => {
-                const channel = await client.channels.fetch(channelId).catch(() => null);
-                if (!channel || !('send' in channel)) return;
-                // Get message ID from config
-                db.get('SELECT value FROM config WHERE key = ?', ['update_message'], async (err, msgRow) => {
-                    if (err) return;
-                    if (!msgRow) {
-                        // Send new message and save ID
-                        const sentMsg = await (channel as TextChannel).send(summary);
-                        db.run('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ['update_message', sentMsg.id]);
-                    } else {
-                        // Edit existing message
-                        try {
-                            const msg = await (channel as TextChannel).messages.fetch((msgRow as { value: string }).value);
-                            await msg.edit(summary);
-                        } catch (e) {
-                            // If message not found, send a new one
-                            const sentMsg = await (channel as TextChannel).send(summary);
-                            db.run('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ['update_message', sentMsg.id]);
+                    const alertRow = await Alert.findByPk(m.id);
+                    if (!alertRow || !alertRow.last_alert || (now - alertRow.last_alert) >= 86400) {
+                        // Send alert
+                        const channel = await client.channels.fetch(channelId).catch(() => null);
+                        if (channel && 'send' in channel) {
+                            const alertMsg = await (channel as TextChannel).send(`⚠️ <@&everyone> ${m.name} has not been in an OC for 24h! React ✅ to increment their tally, ❌ to ignore.`);
+                            // Insert/Update alert
+                            await Alert.upsert({ user_id: m.id, last_alert: now });
+                            // Add reactions
+                            await alertMsg.react('✅');
+                            await alertMsg.react('❌');
+                            // Listen for reactions
+                            const filter = (reaction: any, user: any) => ['✅', '❌'].includes(reaction.emoji.name) && !user.bot;
+                            const collector = alertMsg.createReactionCollector({ filter, time: 5 * 60 * 1000, max: 1 });
+                            collector.on('collect', async (reaction, user) => {
+                                if (reaction.emoji.name === '✅') {
+                                    await User.increment('fuckup_tally', { by: 1, where: { id: m.id } });
+                                }
+                                // No action for ❌
+                            });
+                            collector.on('end', async () => {
+                                await alertMsg.delete().catch(() => {});
+                            });
                         }
                     }
-                });
-            })();
-        });
-    });
-}
+                }
+            }
+
+            // Get the channel and send/update the message
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (!channel || !('send' in channel)) return;
+            // Get message ID from config
+            const msgConfig = await Config.findByPk('update_message');
+            if (!msgConfig) {
+                // Send new message and save ID
+                const sentMsg = await (channel as TextChannel).send(summary);
+                await Config.upsert({ key: 'update_message', value: sentMsg.id });
+            } else {
+                // Edit existing message
+                try {
+                    const msg = await (channel as TextChannel).messages.fetch(msgConfig.value);
+                    await msg.edit(summary);
+                } catch (e) {
+                    // If message not found, send a new one
+                    const sentMsg = await (channel as TextChannel).send(summary);
+                    await Config.upsert({ key: 'update_message', value: sentMsg.id });
+                }
+            }
+        }
+
+    }
 
 cron.schedule('* * * * *', async () => {
     await runOcUpdate();
@@ -273,13 +249,12 @@ client.on('messageCreate', async (message: Message) => {
             return;
         }
         const apiKey = match[1];
-        db.run('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ['torn_api_key', apiKey], (err) => {
-            if (err) {
-                message.reply('Failed to save API key.');
-            } else {
-                message.reply('Torn API key saved successfully.');
-            }
-        });
+        try {
+            await Config.upsert({ key: 'torn_api_key', value: apiKey });
+            await message.reply('Torn API key saved successfully.');
+        } catch (err) {
+            await message.reply('Failed to save API key.');
+        }
         return;
     }
 
@@ -301,13 +276,12 @@ client.on('messageCreate', async (message: Message) => {
             return;
         }
         // Store channel ID in DB
-        db.run('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ['update_channel', channelId], (err) => {
-            if (err) {
-                message.reply('Failed to save channel.');
-            } else {
-                message.reply(`Channel set to <#${channelId}> for updates.`);
-            }
-        });
+        try {
+            await Config.upsert({ key: 'update_channel', value: channelId });
+            await message.reply(`Channel set to <#${channelId}> for updates.`);
+        } catch (err) {
+            await message.reply('Failed to save channel.');
+        }
     }
 });
 
