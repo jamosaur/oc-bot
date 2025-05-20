@@ -4,6 +4,7 @@ dotenv.config();
 import { TornFactionMembersResponse, TornFactionMember } from './types';
 import cron from 'node-cron';
 import { sequelize, syncDb, Config, User, Alert } from './db';
+import { Op } from 'sequelize';
 
 // --- CONFIGURATION ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN || '';
@@ -109,16 +110,21 @@ async function runOcUpdate() {
             }
         
 
-        // Prepare a summary message
-        const membersArr = Object.values(data.members);
-        const total = membersArr.length;
-        const inOC = membersArr.filter(m => m.is_in_oc).length;
-        const notInOC = total - inOC;
+        // Update is_member for all users
+    const apiMemberIds = Object.values(data.members).map((m: any) => m.id);
+    await User.update({ is_member: true }, { where: { id: apiMemberIds } });
+    await User.update({ is_member: false }, { where: { id: { [Op.notIn]: apiMemberIds } } });
+
+    // Prepare a summary message
+    const membersArr = Object.values(data.members);
+    const total = membersArr.length;
+    const inOC = membersArr.filter(m => m.is_in_oc).length;
+    const notInOC = total - inOC;
         // List members not in OC with duration
         const now = Math.floor(Date.now() / 1000);
         // We'll need to query the DB for not_in_oc_since
         const rows = await User.findAll({
-            where: { is_in_oc: false },
+            where: { is_in_oc: false, is_member: true },
             attributes: ['id', 'name', 'not_in_oc_since', 'last_action_timestamp']
         });
         const notInOCMembers = rows.map(row => {

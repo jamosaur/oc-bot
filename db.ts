@@ -41,6 +41,7 @@ export interface UserAttributes {
   is_in_oc: boolean;
   not_in_oc_since?: number | null;
   fuckup_tally?: number;
+  is_member?: boolean;
 }
 
 export class User extends Model<UserAttributes> implements UserAttributes {
@@ -83,6 +84,11 @@ User.init(
       type: DataTypes.INTEGER,
       allowNull: true,
       defaultValue: 0,
+    },
+    is_member: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
     },
   },
   { sequelize, tableName: 'users', timestamps: false }
